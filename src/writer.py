@@ -554,7 +554,7 @@ class Writer(Adw.Application):
         self.zoom_slider.handler_unblock(self.zoom_slider_handler_id)
 
     def create_editor(self):
-        """Create the WebKit-based rich text editor"""
+        """Create the WebKit-based rich text editor with improved initialization"""
         # Scrolled window for the editor
         scrolled = Gtk.ScrolledWindow()
         scrolled.set_vexpand(True)
@@ -564,6 +564,11 @@ class Writer(Adw.Application):
         self.webview = WebKit.WebView()
         scrolled.set_child(self.webview)
         
+        # Enable developer tools for debugging
+        settings = self.webview.get_settings()
+        if hasattr(settings, 'set_enable_developer_extras'):
+            settings.set_enable_developer_extras(True)
+        
         # Set up the WebView for rich text editing
         self.webview.load_html(self.get_editor_html(), None)
         
@@ -572,7 +577,6 @@ class Writer(Adw.Application):
         
         # Handle content changes
         self.webview.connect("notify::estimated-load-progress", self.on_progress_change)
-
     def get_editor_html(self):
         """Return the HTML for the editor using a raw string to avoid escape sequence issues"""
         return r"""
@@ -687,6 +691,375 @@ class Writer(Adw.Application):
                 var tableStartY = 0;
                 var isResizing = false;
                 
+            // Initialize history variables 
+                var editorHistory = [];
+                var historyIndex = -1;
+                var isPerformingUndoRedo = false;
+
+                // Create a better history entry creation function
+                function createHistoryEntry() {
+                    // Don't create entry if we're in the middle of an undo/redo operation
+                    if (isPerformingUndoRedo) return;
+                    
+                    // Get editor content
+                    let editorContent = document.getElementById('editor').innerHTML;
+                    
+                    // Save selection as a range of character offsets within the editor
+                    let selectionInfo = saveSelection();
+                    
+                    let historyEntry = {
+                        content: editorContent,
+                        selection: selectionInfo,
+                        timestamp: Date.now()
+                    };
+                    
+                    // Trim history if navigating from middle point
+                    if (historyIndex >= 0 && historyIndex < editorHistory.length - 1) {
+                        editorHistory = editorHistory.slice(0, historyIndex + 1);
+                    }
+                    
+                    // Add current state to history
+                    editorHistory.push(historyEntry);
+                    historyIndex = editorHistory.length - 1;
+                    
+                    // Debug
+                    console.log("History entry created. Total:", editorHistory.length, "Current:", historyIndex);
+                }
+
+                // Save selection as character offsets
+                function saveSelection() {
+                    const editor = document.getElementById('editor');
+                    const selection = window.getSelection();
+                    
+                    if (!selection.rangeCount) return null;
+                    
+                    const range = selection.getRangeAt(0);
+                    
+                    // Get total text content
+                    const editorText = editor.textContent;
+                    
+                    // Use a temporary range to measure character offsets
+                    const tempRange = document.createRange();
+                    tempRange.setStart(editor, 0);
+                    tempRange.setEnd(range.startContainer, range.startOffset);
+                    const startOffset = tempRange.toString().length;
+                    
+                    // If selection is collapsed (just cursor), end offset is same as start
+                    let endOffset;
+                    if (range.collapsed) {
+                        endOffset = startOffset;
+                    } else {
+                        tempRange.setEnd(range.endContainer, range.endOffset);
+                        endOffset = tempRange.toString().length;
+                    }
+                    
+                    return {
+                        start: startOffset,
+                        end: endOffset,
+                        collapsed: range.collapsed
+                    };
+                }
+
+                // Restore selection from saved character offsets
+                function restoreSelection(selectionInfo) {
+                    if (!selectionInfo) return false;
+                    
+                    const editor = document.getElementById('editor');
+                    const editorText = editor.textContent;
+                    
+                    // Validate offsets against current content length
+                    const maxOffset = editorText.length;
+                    const startOffset = Math.min(selectionInfo.start, maxOffset);
+                    const endOffset = Math.min(selectionInfo.end, maxOffset);
+                    
+                    // Find the nodes and offsets corresponding to character positions
+                    const startPosition = getNodeAndOffsetAtCharacterOffset(editor, startOffset);
+                    const endPosition = getNodeAndOffsetAtCharacterOffset(editor, endOffset);
+                    
+                    if (!startPosition || !endPosition) {
+                        console.error("Failed to find position for offsets:", startOffset, endOffset);
+                        return false;
+                    }
+                    
+                    try {
+                        // Create a range and set it as the current selection
+                        const range = document.createRange();
+                        range.setStart(startPosition.node, startPosition.offset);
+                        range.setEnd(endPosition.node, endPosition.offset);
+                        
+                        const selection = window.getSelection();
+                        selection.removeAllRanges();
+                        selection.addRange(range);
+                        
+                        // Ensure cursor is visible
+                        if (startPosition.node.nodeType === Node.TEXT_NODE) {
+                            startPosition.node.parentNode.scrollIntoView({ behavior: 'auto', block: 'center' });
+                        } else {
+                            startPosition.node.scrollIntoView({ behavior: 'auto', block: 'center' });
+                        }
+                        
+                        return true;
+                    } catch (e) {
+                        console.error("Error restoring selection:", e);
+                        return false;
+                    }
+                }
+
+                // Find node and offset at a given character position in the editor
+                function getNodeAndOffsetAtCharacterOffset(root, charOffset) {
+                    const walker = document.createTreeWalker(
+                        root,
+                        NodeFilter.SHOW_TEXT,
+                        null,
+                        false
+                    );
+                    
+                    let currentOffset = 0;
+                    let node = walker.nextNode();
+                    
+                    while (node) {
+                        const nodeLength = node.nodeValue.length;
+                        
+                        if (currentOffset + nodeLength >= charOffset) {
+                            return {
+                                node: node,
+                                offset: charOffset - currentOffset
+                            };
+                        }
+                        
+                        currentOffset += nodeLength;
+                        node = walker.nextNode();
+                    }
+                    
+                    // If we couldn't find the exact position, return the last position
+                    if (root.lastChild) {
+                        const lastNode = root.lastChild;
+                        return {
+                            node: lastNode.nodeType === Node.TEXT_NODE ? lastNode : root,
+                            offset: lastNode.nodeType === Node.TEXT_NODE ? lastNode.nodeValue.length : root.childNodes.length
+                        };
+                    }
+                    
+                    // Fallback to the root node
+                    return {
+                        node: root,
+                        offset: 0
+                    };
+                }
+
+                // Improved undo function
+                function customUndo() {
+                    console.log("Custom Undo called. Current index:", historyIndex, "History length:", editorHistory.length);
+                    
+                    if (editorHistory.length === 0 || historyIndex <= 0) {
+                        console.log("Nothing to undo - at beginning of history or no history");
+                        return false;
+                    }
+                    
+                    // Flag that we are performing undo/redo to prevent new history entries
+                    isPerformingUndoRedo = true;
+                    
+                    try {
+                        // Go back one step in history
+                        historyIndex--;
+                        let historyEntry = editorHistory[historyIndex];
+                        
+                        // Get the editor
+                        const editor = document.getElementById('editor');
+                        
+                        // Restore content
+                        editor.innerHTML = historyEntry.content;
+                        
+                        // Restore selection if available
+                        if (historyEntry.selection) {
+                            setTimeout(() => {
+                                restoreSelection(historyEntry.selection);
+                            }, 0);
+                        }
+                        
+                        // Notify content changed
+                        window.webkit.messageHandlers.contentChanged.postMessage('changed');
+                        console.log("Undo complete. Now at index:", historyIndex);
+                        return true;
+                    } catch (e) {
+                        console.error("Error during undo:", e);
+                        return false;
+                    } finally {
+                        // Reset the flag
+                        setTimeout(() => {
+                            isPerformingUndoRedo = false;
+                        }, 10);
+                    }
+                }
+
+                // Improved redo function
+                function customRedo() {
+                    console.log("Custom Redo called. Current index:", historyIndex, "History length:", editorHistory.length);
+                    
+                    if (editorHistory.length === 0 || historyIndex >= editorHistory.length - 1) {
+                        console.log("Nothing to redo - at end of history or no history");
+                        return false;
+                    }
+                    
+                    // Flag that we are performing undo/redo to prevent new history entries
+                    isPerformingUndoRedo = true;
+                    
+                    try {
+                        // Go forward one step in history
+                        historyIndex++;
+                        let historyEntry = editorHistory[historyIndex];
+                        
+                        // Get the editor
+                        const editor = document.getElementById('editor');
+                        
+                        // Restore content
+                        editor.innerHTML = historyEntry.content;
+                        
+                        // Restore selection if available
+                        if (historyEntry.selection) {
+                            setTimeout(() => {
+                                restoreSelection(historyEntry.selection);
+                            }, 0);
+                        }
+                        
+                        // Notify content changed
+                        window.webkit.messageHandlers.contentChanged.postMessage('changed');
+                        console.log("Redo complete. Now at index:", historyIndex);
+                        return true;
+                    } catch (e) {
+                        console.error("Error during redo:", e);
+                        return false;
+                    } finally {
+                        // Reset the flag
+                        setTimeout(() => {
+                            isPerformingUndoRedo = false;
+                        }, 10);
+                    }
+                }
+
+                // Update replaceSelection function to create history entries
+                function replaceSelection(replaceText) {
+                    if (searchResults.length === 0 || searchIndex < 0) return false;
+                    
+                    // Create history entry before change
+                    createHistoryEntry();
+                    
+                    // Now perform the replacement
+                    let span = searchResults[searchIndex];
+                    let range = document.createRange();
+                    range.selectNodeContents(span);
+                    
+                    let selection = window.getSelection();
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    
+                    // Replace the text
+                    document.execCommand('insertText', false, replaceText);
+                    
+                    // Create another history entry after the change
+                    setTimeout(() => {
+                        createHistoryEntry();
+                    }, 0);
+                    
+                    // Mark document as modified
+                    window.webkit.messageHandlers.contentChanged.postMessage('changed');
+                    
+                    // Need to rebuild the search results
+                    let searchText = currentSearchText;
+                    setTimeout(() => {
+                        searchAndHighlight(searchText);
+                    }, 10);
+                    
+                    return true;
+                }
+
+                // Update replaceAll function to create history entries
+                function replaceAll(searchText, replaceText) {
+                    if (!searchText) return 0;
+                    
+                    // Create history entry before change
+                    createHistoryEntry();
+                    
+                    // First clear any existing search
+                    clearSearch();
+                    
+                    let editor = document.getElementById('editor');
+                    let content = editor.innerHTML;
+                    
+                    // Escape special characters for regex
+                    let escapedSearch = searchText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    let regexSearch = new RegExp(escapedSearch, 'g');
+                    
+                    // Replace all occurrences
+                    let newContent = content.replace(regexSearch, replaceText);
+                    
+                    // Count how many replacements were made
+                    let count = 0;
+                    let tempCount = (content.match(regexSearch) || []).length;
+                    count = tempCount;
+                    
+                    // Update editor content
+                    editor.innerHTML = newContent;
+                    
+                    // Create another history entry after the change
+                    setTimeout(() => {
+                        createHistoryEntry();
+                    }, 0);
+                    
+                    // Mark document as modified
+                    window.webkit.messageHandlers.contentChanged.postMessage('changed');
+                    
+                    return count;
+                }
+
+                // Make sure to add this to your document ready function
+                document.addEventListener('DOMContentLoaded', function() {
+                    const editor = document.getElementById('editor');
+                    
+                    if (editor.innerHTML.trim() === '') {
+                        editor.innerHTML = '<div><br></div>';
+                    }
+                    
+                    // Add input listener to capture regular edits
+                    editor.addEventListener('input', function(e) {
+                        // Don't create history for programmatic changes during undo/redo
+                        if (!isPerformingUndoRedo) {
+                            createHistoryEntry();
+                        }
+                    });
+                    
+                    // Create initial history entry
+                    setTimeout(() => {
+                        createHistoryEntry();
+                    }, 100);
+                    
+                    // Other event listeners...
+                    
+                    // Add keyboard shortcut handlers for undo/redo
+                    editor.addEventListener('keydown', function(e) {
+                        if (e.key === 'z' && e.ctrlKey && !e.shiftKey) {
+                            // Ctrl+Z (Undo)
+                            e.preventDefault();
+                            customUndo();
+                        } else if ((e.key === 'z' && e.ctrlKey && e.shiftKey) || 
+                                (e.key === 'y' && e.ctrlKey)) {
+                            // Ctrl+Shift+Z or Ctrl+Y (Redo)
+                            e.preventDefault();
+                            customRedo();
+                        }
+                    });
+                });
+
+                // Add debugging function
+                function debugHistory() {
+                    console.log({
+                        historyLength: editorHistory.length,
+                        currentIndex: historyIndex,
+                        isPerformingUndoRedo: isPerformingUndoRedo,
+                        currentContent: document.getElementById('editor').innerHTML.substring(0, 100) + '...'
+                    });
+                    return true;
+                }
                 document.addEventListener('DOMContentLoaded', function() {
                     const editor = document.getElementById('editor');
                     if (editor.innerHTML.trim() === '') {
@@ -757,7 +1130,7 @@ class Writer(Adw.Application):
                     
                     setupTableEventHandlers();
                 });
-                
+
                 function setupTableEventHandlers() {
                     const editor = document.getElementById('editor');
                     
@@ -1381,62 +1754,7 @@ class Writer(Adw.Application):
                     return selectSearchResult(searchIndex);
                 }
                 
-                function replaceSelection(replaceText) {
-                    if (searchResults.length === 0 || searchIndex < 0) return false;
-                    
-                    let span = searchResults[searchIndex];
-                    let range = document.createRange();
-                    range.selectNodeContents(span);
-                    
-                    let selection = window.getSelection();
-                    selection.removeAllRanges();
-                    selection.addRange(range);
-                    
-                    // Replace the text
-                    document.execCommand('insertText', false, replaceText);
-                    
-                    // Need to rebuild the search results
-                    let searchText = currentSearchText;
-                    setTimeout(() => {
-                        searchAndHighlight(searchText);
-                    }, 10);
-                    
-                    return true;
-                }
-                
-                function replaceAll(searchText, replaceText) {
-                    if (!searchText) return 0;
-                    
-                    // First clear any existing search
-                    clearSearch();
-                    
-                    let editor = document.getElementById('editor');
-                    let content = editor.innerHTML;
-                    
-                    // Escape special characters for regex
-                    let escapedSearch = searchText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                    let regexSearch = new RegExp(escapedSearch, 'g');
-                    
-                    // Replace all occurrences
-                    let newContent = content.replace(regexSearch, replaceText);
-                    
-                    // Count how many replacements were made
-                    let count = 0;
-                    let tempCount = (content.match(regexSearch) || []).length;
-                    count = tempCount;
-                    
-                    // Update editor content
-                    editor.innerHTML = newContent;
-                    
-                    // Highlight the replaced text
-                    currentSearchText = replaceText;
-                    setTimeout(() => {
-                        searchAndHighlight(replaceText);
-                    }, 10);
-                    
-                    return count;
-                }
-                
+               
                 // Paragraph and line spacing functions
                 function setParagraphSpacing(spacing) {
                     let selection = window.getSelection();
@@ -2344,80 +2662,57 @@ class Writer(Adw.Application):
         """Handle Ctrl+K shortcut"""
         self.strikethrough_button.set_active(not self.strikethrough_button.get_active())
         
-    # Cut, copy, paste handlers
-    def on_cut(self, action, param):
-        """Handle Cut command"""
-        js_code = "doCut();"
-        self.webview.evaluate_javascript(js_code, -1, None, None, None, None)
-        
-    def on_copy(self, action, param):
-        """Handle Copy command"""
-        js_code = "doCopy();"
-        self.webview.evaluate_javascript(js_code, -1, None, None, None, None)
-            
-    def xon_paste(self, action, param):
-        """Handle Paste command using a direct WebKit approach for version 6.0"""
-        # For WebKit 6.0, we need to use a simplified approach
-        
-        # Method 1: Try using the direct editing command name as a string
-        # This often works with WebKit 6.0
-        try:
-            # This requires WebKitGTK 2.34.0+
-            self.webview.execute_editing_command("paste")
-            
-            # Mark document as modified after a short delay
-            GLib.timeout_add(100, self.mark_modified_after_paste)
-            return
-        except (AttributeError, TypeError) as e:
-            print(f"Direct paste command failed: {e}")
-            # Continue with fallback method
-        
-        # Method 2: Use the paste functionality from our JavaScript
+    def on_undo_clicked(self, action, param):
+        """Handle Undo command using custom implementation with debug output"""
         js_code = """
         (function() {
-            // Focus the editor first
-            document.getElementById('editor').focus();
-            
-            // Trigger paste through execCommand
-            var result = document.execCommand('paste', false);
-            console.log('Paste command result:', result);
-            
-            // Signal that content changed
-            setTimeout(function() {
-                window.webkit.messageHandlers.contentChanged.postMessage('changed');
-            }, 100);
-            
-            return result;
+            console.log("Python-triggered undo", editorHistory.length, historyIndex);
+            debugHistory();
+            return customUndo();
         })();
         """
+        self.webview.evaluate_javascript(js_code, -1, None, None, None, 
+                                        lambda webview, result: self.handle_undo_result(webview, result))
         
-        self.webview.evaluate_javascript(js_code, -1, None, None, None, None)
-        
-        # Mark document as modified after a short delay
-        GLib.timeout_add(100, self.mark_modified_after_paste)
+    def handle_undo_result(self, webview, result):
+        """Handle result from undo operation"""
+        try:
+            js_result = webview.evaluate_javascript_finish(result)
+            if js_result and not js_result.is_null():
+                success = js_result.to_boolean()
+                if success:
+                    self.status_label.set_text("Undo completed")
+                else:
+                    self.status_label.set_text("Nothing to undo")
+        except Exception as e:
+            print(f"Error handling undo result: {e}")
+            self.status_label.set_text("Undo error")
 
-    def mark_modified_after_paste(self):
-        """Mark the document as modified after paste operation"""
-        self.modified = True
-        self.update_window_title()
-        self.update_word_count()
-        return False  # Don't repeat the timeout
-            
-    def on_select_all(self, action, param):
-        """Handle Select All command"""
-        js_code = "selectAll();"
-        self.webview.evaluate_javascript(js_code, -1, None, None, None, None)
-        
-    def on_undo_clicked(self, action, param):
-        """Handle Undo command"""
-        js_code = "document.execCommand('undo', false, null);"
-        self.webview.evaluate_javascript(js_code, -1, None, None, None, None)
-    
     def on_redo_clicked(self, action, param):
-        """Handle Redo command"""
-        js_code = "document.execCommand('redo', false, null);"
-        self.webview.evaluate_javascript(js_code, -1, None, None, None, None)
-        
+        """Handle Redo command using custom implementation with debug output"""
+        js_code = """
+        (function() {
+            console.log("Python-triggered redo", editorHistory.length, historyIndex);
+            debugHistory();
+            return customRedo();
+        })();
+        """
+        self.webview.evaluate_javascript(js_code, -1, None, None, None,
+                                        lambda webview, result: self.handle_redo_result(webview, result))
+
+    def handle_redo_result(self, webview, result):
+        """Handle result from redo operation"""
+        try:
+            js_result = webview.evaluate_javascript_finish(result)
+            if js_result and not js_result.is_null():
+                success = js_result.to_boolean()
+                if success:
+                    self.status_label.set_text("Redo completed")
+                else:
+                    self.status_label.set_text("Nothing to redo")
+        except Exception as e:
+            print(f"Error handling redo result: {e}")
+            self.status_label.set_text("Redo error")
         
     # RTL support
     def on_rtl_toggled(self, button):
