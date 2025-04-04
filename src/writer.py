@@ -762,9 +762,35 @@ class Writer(Adw.Application):
 
                 // Restore selection from saved character offsets
                 function restoreSelection(selectionInfo) {
-                    if (!selectionInfo) return false;
+                if (!selectionInfo) return false;
+                
+                const editor = document.getElementById('editor');
+                
+                // Handle empty editor case
+                if (editor.innerHTML.trim() === '' || 
+                    editor.innerHTML.trim() === '<br>' || 
+                    editor.innerHTML.trim() === '<div><br></div>') {
                     
-                    const editor = document.getElementById('editor');
+                    const range = document.createRange();
+                    const selection = window.getSelection();
+                    
+                    // Find the first element
+                    let firstNode = editor.firstChild;
+                    if (!firstNode) {
+                        editor.innerHTML = '<div><br></div>';
+                        firstNode = editor.firstChild;
+                    }
+                    
+                    range.setStart(firstNode, 0);
+                    range.setEnd(firstNode, 0);
+                    
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    return true;
+                }
+                
+                // For non-empty content
+                try {
                     const editorText = editor.textContent;
                     
                     // Validate offsets against current content length
@@ -781,29 +807,21 @@ class Writer(Adw.Application):
                         return false;
                     }
                     
-                    try {
-                        // Create a range and set it as the current selection
-                        const range = document.createRange();
-                        range.setStart(startPosition.node, startPosition.offset);
-                        range.setEnd(endPosition.node, endPosition.offset);
-                        
-                        const selection = window.getSelection();
-                        selection.removeAllRanges();
-                        selection.addRange(range);
-                        
-                        // Ensure cursor is visible
-                        if (startPosition.node.nodeType === Node.TEXT_NODE) {
-                            startPosition.node.parentNode.scrollIntoView({ behavior: 'auto', block: 'center' });
-                        } else {
-                            startPosition.node.scrollIntoView({ behavior: 'auto', block: 'center' });
-                        }
-                        
-                        return true;
-                    } catch (e) {
-                        console.error("Error restoring selection:", e);
-                        return false;
-                    }
+                    // Create a range and set it as the current selection
+                    const range = document.createRange();
+                    range.setStart(startPosition.node, startPosition.offset);
+                    range.setEnd(endPosition.node, endPosition.offset);
+                    
+                    const selection = window.getSelection();
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    
+                    return true;
+                } catch (e) {
+                    console.error("Error restoring selection:", e);
+                    return false;
                 }
+            }
 
                 // Find node and offset at a given character position in the editor
                 function getNodeAndOffsetAtCharacterOffset(root, charOffset) {
@@ -867,18 +885,40 @@ class Writer(Adw.Application):
                         // Get the editor
                         const editor = document.getElementById('editor');
                         
-                        // Restore content
-                        editor.innerHTML = historyEntry.content;
+                        // Save the current scroll position
+                        const scrollTop = editor.scrollTop;
+                        const scrollLeft = editor.scrollLeft;
                         
-                        // Restore selection if available
-                        if (historyEntry.selection) {
-                            setTimeout(() => {
+                        // Create a temporary invisible container to set up the content and selection
+                        // This prevents the flash of cursor at the beginning during the update
+                        const tempDiv = document.createElement('div');
+                        tempDiv.style.position = 'absolute';
+                        tempDiv.style.left = '-9999px';
+                        tempDiv.style.top = '-9999px';
+                        tempDiv.innerHTML = historyEntry.content;
+                        document.body.appendChild(tempDiv);
+                        
+                        // Apply to the real editor in a single operation
+                        requestAnimationFrame(() => {
+                            // Update content
+                            editor.innerHTML = historyEntry.content;
+                            
+                            // Restore scroll position
+                            editor.scrollTop = scrollTop;
+                            editor.scrollLeft = scrollLeft;
+                            
+                            // Remove the temporary element
+                            document.body.removeChild(tempDiv);
+                            
+                            // Restore selection if available
+                            if (historyEntry.selection) {
                                 restoreSelection(historyEntry.selection);
-                            }, 0);
-                        }
+                            }
+                            
+                            // Notify content changed
+                            window.webkit.messageHandlers.contentChanged.postMessage('changed');
+                        });
                         
-                        // Notify content changed
-                        window.webkit.messageHandlers.contentChanged.postMessage('changed');
                         console.log("Undo complete. Now at index:", historyIndex);
                         return true;
                     } catch (e) {
@@ -912,18 +952,40 @@ class Writer(Adw.Application):
                         // Get the editor
                         const editor = document.getElementById('editor');
                         
-                        // Restore content
-                        editor.innerHTML = historyEntry.content;
+                        // Save the current scroll position
+                        const scrollTop = editor.scrollTop;
+                        const scrollLeft = editor.scrollLeft;
                         
-                        // Restore selection if available
-                        if (historyEntry.selection) {
-                            setTimeout(() => {
+                        // Create a temporary invisible container to set up the content and selection
+                        // This prevents the flash of cursor at the beginning during the update
+                        const tempDiv = document.createElement('div');
+                        tempDiv.style.position = 'absolute';
+                        tempDiv.style.left = '-9999px';
+                        tempDiv.style.top = '-9999px';
+                        tempDiv.innerHTML = historyEntry.content;
+                        document.body.appendChild(tempDiv);
+                        
+                        // Apply to the real editor in a single operation
+                        requestAnimationFrame(() => {
+                            // Update content
+                            editor.innerHTML = historyEntry.content;
+                            
+                            // Restore scroll position
+                            editor.scrollTop = scrollTop;
+                            editor.scrollLeft = scrollLeft;
+                            
+                            // Remove the temporary element
+                            document.body.removeChild(tempDiv);
+                            
+                            // Restore selection if available
+                            if (historyEntry.selection) {
                                 restoreSelection(historyEntry.selection);
-                            }, 0);
-                        }
+                            }
+                            
+                            // Notify content changed
+                            window.webkit.messageHandlers.contentChanged.postMessage('changed');
+                        });
                         
-                        // Notify content changed
-                        window.webkit.messageHandlers.contentChanged.postMessage('changed');
                         console.log("Redo complete. Now at index:", historyIndex);
                         return true;
                     } catch (e) {
